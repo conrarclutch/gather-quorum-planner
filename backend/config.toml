@@ -1,0 +1,2 @@
+[functions.backend]
+verify_jwt = false
