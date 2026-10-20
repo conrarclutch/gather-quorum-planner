@@ -1,2 +1,2 @@
-[functions.backend]
+[functions.gather-planner]
 verify_jwt = false

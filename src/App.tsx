@@ -20,8 +20,15 @@ import { previewEvents } from './previewData';
 type Screen = 'Overview' | 'Calendar' | 'My signups' | 'Sources';
 const previewModeKey = 'gather-preview-mode';
 const previewChangesKey = 'gather-preview-changes';
+const inviteStorageKey = `priests-planner-invite:${import.meta.env.VITE_API_URL || 'unconfigured'}`;
 type PreviewChanges = { rsvps: Record<string,RsvpInput>; claims: Record<string,boolean>; extraTasks: Record<string,Array<{id:string;title:string}>> };
-const loadPreviewChanges = ():PreviewChanges => { try { const raw=sessionStorage.getItem(previewChangesKey); return raw?JSON.parse(raw) as PreviewChanges:{rsvps:{},claims:{},extraTasks:{}}; } catch { return {rsvps:{},claims:{},extraTasks:{}}; } };
+const readSessionStorage = (key:string) => { try { return sessionStorage.getItem(key); } catch { return null; } };
+const writeSessionStorage = (key:string,value:string) => { try { sessionStorage.setItem(key,value); } catch { /* Browser storage may be unavailable in private mode. */ } };
+const removeSessionStorage = (key:string) => { try { sessionStorage.removeItem(key); } catch { /* Browser storage may be unavailable in private mode. */ } };
+const readLocalStorage = (key:string) => { try { return localStorage.getItem(key); } catch { return null; } };
+const writeLocalStorage = (key:string,value:string) => { try { localStorage.setItem(key,value); } catch { /* Browser storage may be unavailable in private mode. */ } };
+const removeLocalStorage = (key:string) => { try { localStorage.removeItem(key); } catch { /* Browser storage may be unavailable in private mode. */ } };
+const loadPreviewChanges = ():PreviewChanges => { try { const raw=readSessionStorage(previewChangesKey); return raw?JSON.parse(raw) as PreviewChanges:{rsvps:{},claims:{},extraTasks:{}}; } catch { return {rsvps:{},claims:{},extraTasks:{}}; } };
 const dateFmt = new Intl.DateTimeFormat('en-US', { weekday:'long', month:'long', day:'numeric', timeZone:'UTC' });
 const shortDate = new Intl.DateTimeFormat('en-US', { month:'short', day:'numeric', timeZone:'UTC' });
 const monthDate = new Intl.DateTimeFormat('en-US', { month:'long', year:'numeric', timeZone:'UTC' });
@@ -39,11 +46,11 @@ const timeLabel = (time: string | null) => {
 };
 const taskListFor = (state: PlannerState | null, event: PlannerEvent) => (state?.tasks ?? []).filter(task => task.eventId === event.id);
 const needsPlanning = (event: PlannerEvent) => !event.confirmed || !event.startTime || !event.location || !event.leader;
-const initialInvite = () => new URLSearchParams(location.hash.replace(/^#/, '')).get('invite') ?? '';
+const initialInvite = () => new URLSearchParams(location.hash.replace(/^#/, '')).get('invite') ?? readLocalStorage(inviteStorageKey) ?? readSessionStorage(inviteStorageKey) ?? '';
 
 function App() {
   const configured = Boolean(import.meta.env.VITE_API_URL && import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY);
-  const [preview, setPreview] = useState(() => new URLSearchParams(location.search).get('preview') === '1' || sessionStorage.getItem(previewModeKey) === 'yes');
+  const [preview, setPreview] = useState(() => !configured && (new URLSearchParams(location.search).get('preview') === '1' || readSessionStorage(previewModeKey) === 'yes'));
   const [session, setSession] = useState<GroupSession | null>(() => getSession());
   const [state, setState] = useState<PlannerState | null>(null);
   const [events, setEvents] = useState<PlannerEvent[]>([]);
@@ -91,6 +98,11 @@ function App() {
     finally { setBusy(false); }
   };
   useEffect(() => { if (session && !preview) void refresh(session); }, []);
+  useEffect(() => {
+    if (!configured) return;
+    removeSessionStorage(previewModeKey);
+    removeSessionStorage(previewChangesKey);
+  }, [configured]);
   useEffect(() => {
     if (!session || preview) return;
     const refreshWhenVisible = () => { if (document.visibilityState === 'visible') void refresh(session); };
@@ -170,13 +182,13 @@ function App() {
 
   const join = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true); setError('');
-    try { const next = await joinGroup({ inviteCode: inviteCode.trim(), displayName: displayName.trim(), ...(ownerCode.trim() ? { ownerCode:ownerCode.trim() } : {}) }); setSession(next); setPreview(false); sessionStorage.removeItem(previewModeKey); await refresh(next); }
+    try { const next = await joinGroup({ inviteCode: inviteCode.trim(), displayName: displayName.trim(), ...(ownerCode.trim() ? { ownerCode:ownerCode.trim() } : {}) }); writeLocalStorage(inviteStorageKey,inviteCode.trim()); writeSessionStorage(inviteStorageKey,inviteCode.trim()); setSession(next); setPreview(false); removeSessionStorage(previewModeKey); removeSessionStorage(previewChangesKey); await refresh(next); }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not join this group.'); }
     finally { setBusy(false); }
   };
-  const enablePreview = () => { sessionStorage.setItem(previewModeKey,'yes'); setPreview(true); setState(null); setEvents([]); setSelectedId('preview-1'); setError(''); };
-  const updatePreview = (next:PreviewChanges) => { setPreviewChanges(next); sessionStorage.setItem(previewChangesKey,JSON.stringify(next)); };
-  const exitPreview = () => { sessionStorage.removeItem(previewModeKey); setPreview(false); if (session) void refresh(session); };
+  const enablePreview = () => { writeSessionStorage(previewModeKey,'yes'); setPreview(true); setState(null); setEvents([]); setSelectedId('preview-1'); setError(''); };
+  const updatePreview = (next:PreviewChanges) => { setPreviewChanges(next); writeSessionStorage(previewChangesKey,JSON.stringify(next)); };
+  const exitPreview = () => { removeSessionStorage(previewModeKey); setPreview(false); if (session) void refresh(session); };
   const runAction = async (fn: () => Promise<unknown>, success?: string) => { setBusy(true); setError(''); setNotice(''); try { await fn(); await refresh(); if (success) setNotice(success); return true; } catch(e) { if(e instanceof ApiError&&e.status===401){clearSession();setSession(null);setState(null);setEvents([]);} if(e instanceof ApiError&&e.status===409) await refresh(); setError(e instanceof Error ? e.message : 'That change could not be saved.'); return false; } finally { setBusy(false); } };
   const doRsvp = (status: RsvpInput['status']) => {
     if (!selected) return;
@@ -187,8 +199,8 @@ function App() {
   const saveLogistics = async (e: React.FormEvent) => { e.preventDefault(); if (!selected || !state || preview) return; const saved = await runAction(() => updateEvent(selected.id,selected.updatedAt,editForm),'Plan details saved.'); if (saved) setEditOpen(false); };
   const doClaim = (task: PlannerTask, claim: boolean) => { if (preview) { updatePreview({...previewChanges,claims:{...previewChanges.claims,[task.id]:claim}}); setNotice(claim?'Saved in this browser preview.':'You released this preview task.'); return; } void runAction(() => claimTask(task.id,claim),claim ? 'You’re on it.' : 'You released this task.'); };
   const createTask = (e: React.FormEvent) => { e.preventDefault(); if (!selected || !newTask.trim()) return; if (preview) { updatePreview({...previewChanges,extraTasks:{...previewChanges.extraTasks,[selected.id]:[...(previewChanges.extraTasks[selected.id]??[]),{id:`preview-extra-${Date.now()}`,title:newTask.trim()}]}}); setNotice('Added in this browser preview.'); setNewTask(''); return; } void runAction(() => addTask({eventId:selected.id,title:newTask.trim()}),'Task added.').then(saved => { if (saved) setNewTask(''); }); };
-  const signOut = () => { clearSession(); setSession(null); setState(null); setEvents([]); setScreen('Overview'); setError(''); };
-  const copyShare = async () => { const url = `${location.origin}${location.pathname}${preview ? '?preview=1' : ''}`; const message = preview ? 'Preview link copied. Preview changes are not shared.' : 'Group link copied. Share the invite code separately.'; try { await navigator.clipboard.writeText(url); setNotice(message); } catch { window.prompt(preview ? 'Copy this preview link. Changes are not shared.' : 'Copy this group link. Share the invite code separately.',url); } };
+  const signOut = () => { clearSession(); removeSessionStorage(inviteStorageKey); removeLocalStorage(inviteStorageKey); setInviteCode(new URLSearchParams(location.hash.replace(/^#/, '')).get('invite') ?? ''); setSession(null); setState(null); setEvents([]); setScreen('Overview'); setError(''); };
+  const copyShare = async () => { const invite = preview ? '' : inviteCode.trim(); const url = `${location.origin}${location.pathname}${preview ? '?preview=1' : invite ? `#invite=${encodeURIComponent(invite)}` : ''}`; const message = preview ? 'Preview link copied. Preview changes are not shared.' : invite ? 'Group invite link copied.' : 'Group link copied. Share the invite code separately.'; try { await navigator.clipboard.writeText(url); setNotice(message); } catch { window.prompt(preview ? 'Copy this preview link. Changes are not shared.' : invite ? 'Copy this group invite link.' : 'Copy this group link. Share the invite code separately.',url); } };
 
   if (!preview && !session) return <JoinGate configured={configured} inviteCode={inviteCode} setInviteCode={setInviteCode} displayName={displayName} setDisplayName={setDisplayName} ownerOpen={ownerOpen} setOwnerOpen={setOwnerOpen} ownerCode={ownerCode} setOwnerCode={setOwnerCode} busy={busy} error={error} join={join} preview={enablePreview} />;
   if (!preview && session && !state && busy) return <div className="page-loader"><GatherMark/><p>Opening your shared plans…</p></div>;
@@ -238,10 +250,10 @@ function App() {
               <div className="list-footer"><button className="quiet-button" onClick={()=>downloadCalendar(filtered)}><CalendarDays size={16}/>Export calendar</button><button className="quiet-button" onClick={()=>window.print()}><FileText size={16}/>Print</button><button className="quiet-button" onClick={()=>void refresh()} disabled={busy}>Refresh plans</button></div>
             </section>
           </div>
-          <div className="right-stack"><CalendarGrid events={activeEvents} month={calendarMonth} selectedDate={selectedCalendarDate} onDateChange={handleCalendarDate} onMonthChange={setCalendarMonth} compact/><aside className={`plan-panel ${mobileDetail?'mobile-open':''}`} role={mobileDetail?'dialog':undefined} aria-modal={mobileDetail||undefined} aria-label="Selected activity plan">{selected&&<><button ref={mobileDetailBackRef} className="mobile-back" onClick={()=>setMobileDetail(false)}><ArrowLeft size={17}/> Back to activities</button><PlanPanel event={selected} tasks={tasks} state={plannerState} currentRsvp={currentRsvp} preview={preview} tab={tab} setTab={setTab} setRsvp={setRsvp} rsvp={rsvp} doRsvp={doRsvp} doClaim={doClaim} newTask={newTask} setNewTask={setNewTask} createTask={createTask} openEdit={()=>{setEditForm(eventToPatch(selected));setEditOpen(true)}} busy={busy}/></>}</aside></div>
+          <div className="right-stack"><CalendarGrid events={activeEvents} month={calendarMonth} selectedDate={selectedCalendarDate} onDateChange={handleCalendarDate} onMonthChange={setCalendarMonth} compact/><aside className={`plan-panel ${mobileDetail?'mobile-open':''}`} role={mobileDetail?'dialog':undefined} aria-modal={mobileDetail||undefined} aria-label="Selected activity plan">{selected&&<><button ref={mobileDetailBackRef} className="mobile-back" onClick={()=>setMobileDetail(false)}><ArrowLeft size={17}/> Back to activities</button><PlanPanel event={selected} tasks={tasks} state={plannerState} currentRsvp={currentRsvp} preview={preview} tab={tab} setTab={setTab} setRsvp={setRsvp} rsvp={rsvp} doRsvp={doRsvp} doClaim={doClaim} newTask={newTask} setNewTask={setNewTask} createTask={createTask} openEdit={()=>{setError('');setEditForm(eventToPatch(selected));setEditOpen(true)}} busy={busy}/></>}</aside></div>
         </div>}
       </main>
-      {editOpen&&selected&&<EditDialog event={selected} value={editForm} onChange={setEditForm} onClose={()=>setEditOpen(false)} onSubmit={saveLogistics} busy={busy}/>}
+      {editOpen&&selected&&<EditDialog event={selected} value={editForm} onChange={setEditForm} onClose={()=>{setEditOpen(false);setError('')}} onSubmit={saveLogistics} busy={busy} error={error}/>}
       <footer className="site-footer">Gather · Priests quorum</footer>
     </div>
   </div>;

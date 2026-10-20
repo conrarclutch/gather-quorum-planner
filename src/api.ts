@@ -1,9 +1,37 @@
 import type { EventPatch, GroupSession, PlannerState, PlannerTask, Rsvp, RsvpInput } from "./types";
 
 const SESSION_KEY = "priests-planner-session";
+const LEGACY_SESSION_KEY = SESSION_KEY;
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 const baseUrl = viteEnv.VITE_API_URL?.replace(/\/+$/, "");
 const publishableKey = viteEnv.VITE_SUPABASE_PUBLISHABLE_KEY;
+const persistentSessionKey = `${SESSION_KEY}:${baseUrl || "unconfigured"}`;
+let transientSession: GroupSession | null = null;
+
+const getLocalStorage = (): Storage | null => { try { return typeof window === "undefined" ? null : window.localStorage; } catch { return null; } };
+const getSessionStorage = (): Storage | null => { try { return typeof window === "undefined" ? null : window.sessionStorage; } catch { return null; } };
+const safeStorageGet = (storage: Storage | null, key: string): string | null => {
+  if (!storage) return null;
+  try { return storage.getItem(key); } catch { return null; }
+};
+const safeStorageSet = (storage: Storage | null, key: string, value: string): boolean => {
+  if (!storage) return false;
+  try { storage.setItem(key, value); return true; } catch { return false; }
+};
+const safeStorageRemove = (storage: Storage | null, key: string): void => { try { storage?.removeItem(key); } catch { /* Private browsing may disable storage. */ } };
+const validSession = (value: unknown): value is GroupSession => {
+  const session = value as GroupSession | null;
+  return Boolean(session?.token && session?.expiresAt && Number.isFinite(Date.parse(session.expiresAt)) && Date.parse(session.expiresAt) > Date.now() && session.member?.id && session.member?.displayName);
+};
+const saveSession = (session: GroupSession): void => {
+  transientSession = session;
+  const raw = JSON.stringify(session);
+  if (safeStorageSet(getLocalStorage(), persistentSessionKey, raw)) {
+    safeStorageRemove(getSessionStorage(), LEGACY_SESSION_KEY);
+  } else {
+    safeStorageSet(getSessionStorage(), LEGACY_SESSION_KEY, raw);
+  }
+};
 
 export class ApiError extends Error {
   constructor(message: string, public status: number) {
@@ -35,19 +63,23 @@ const request = async <T>(path: string, options: { method?: "GET" | "POST"; body
 
 export async function joinGroup(input: { inviteCode: string; displayName: string; ownerCode?: string }): Promise<GroupSession> {
   const session = await request<GroupSession>("join", { method: "POST", body: input });
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  saveSession(session);
   return session;
 }
 
 export function getSession(): GroupSession | null {
-  const raw = sessionStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
+  const stored = safeStorageGet(getLocalStorage(), persistentSessionKey);
+  const isLegacy = !stored;
+  const raw = stored ?? safeStorageGet(getSessionStorage(), LEGACY_SESSION_KEY);
+  if (!raw) return transientSession && validSession(transientSession) ? transientSession : null;
   try {
-    const value = JSON.parse(raw) as GroupSession;
-    if (!value?.token || !value?.expiresAt || new Date(value.expiresAt).getTime() <= Date.now()) {
+    const value: unknown = JSON.parse(raw);
+    if (!validSession(value)) {
       clearSession();
       return null;
     }
+    transientSession = value;
+    if (isLegacy) saveSession(value);
     return value;
   } catch {
     clearSession();
@@ -56,7 +88,9 @@ export function getSession(): GroupSession | null {
 }
 
 export function clearSession(): void {
-  sessionStorage.removeItem(SESSION_KEY);
+  transientSession = null;
+  safeStorageRemove(getLocalStorage(), persistentSessionKey);
+  safeStorageRemove(getSessionStorage(), LEGACY_SESSION_KEY);
 }
 
 export async function getState(): Promise<PlannerState> {
